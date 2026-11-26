@@ -86,7 +86,8 @@ namespace XRScan.Core
             var pending = _pending;
             if (pending == null || _clock() < pending.Deadline) return;
             Complete(pending.Ticket, ReplyCheckResult.Unavailable(
-                "the safety check did not answer within " + pending.Timeout.ToString("0.#") + " seconds."));
+                "the safety check did not answer within " + pending.Timeout.ToString("0.#") +
+                " seconds; the server may still be loading its model."));
         }
 
         private void Complete(int ticket, ReplyCheckResult result)

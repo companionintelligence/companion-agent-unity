@@ -103,6 +103,23 @@ namespace XRScan.Llm
         }
 
         /// <summary>
+        /// The /api/chat body with no messages, which Ollama answers by loading <paramref name="model"/> and generating
+        /// nothing, with the context window <paramref name="contextLength"/> (clamped like
+        /// <see cref="LlmConfig.SafetyContextLength"/>). It must match the window of the check's requests, or the first of
+        /// them loads the model again.
+        /// </summary>
+        public static string BuildWarmUpJson(string model, int contextLength = LlmConfig.DefaultContextLength)
+        {
+            return JsonUtility.ToJson(new Request
+            {
+                model = model ?? string.Empty,
+                messages = new Message[0],
+                stream = false,
+                options = new Options { temperature = 0f, num_ctx = LlmConfig.ClampContextLength(contextLength) },
+            });
+        }
+
+        /// <summary>
         /// Reads one answer. <paramref name="status"/> is the HTTP status (0 when the server was not reached),
         /// <paramref name="body"/> the response text and <paramref name="transportError"/> the request's error, null when
         /// it succeeded. Yes is <see cref="ReplyVerdict.Blocked"/>, No is <see cref="ReplyVerdict.Safe"/>, anything else
@@ -116,6 +133,10 @@ namespace XRScan.Llm
                 return ReplyCheckResult.Unavailable(model + " is not installed on the LLM server. Install it there: ollama pull " + model);
             if (!string.IsNullOrEmpty(transportError) || status >= 400)
             {
+                // A model the server is still loading answers late, which is not an unreachable server.
+                if (IsTimeout(transportError))
+                    return ReplyCheckResult.Unavailable(
+                        "the LLM server did not answer the safety check in time; it may still be loading " + model + ".");
                 if (status == 0) return ReplyCheckResult.Unavailable("the LLM server could not be reached for the safety check.");
                 return ReplyCheckResult.Unavailable("the LLM server refused the safety check with " + model + " (HTTP " + status + ").");
             }
@@ -169,6 +190,12 @@ namespace XRScan.Llm
                 return null;
             }
         }
+
+        /// <summary>UnityWebRequest reports its own timeout as "Request timeout" or "Request timed out".</summary>
+        private static bool IsTimeout(string transportError) =>
+            !string.IsNullOrEmpty(transportError) &&
+            (transportError.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0 ||
+             transportError.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0);
 
         private static ReplyCheckResult Unreadable(string model) =>
             ReplyCheckResult.Unavailable(model + " gave an answer the app cannot read (expected Yes or No).");
