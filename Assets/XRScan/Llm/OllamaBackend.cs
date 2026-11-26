@@ -17,7 +17,8 @@ namespace XRScan.Llm
     /// (<see cref="LlmConfig.BuildSystemMessage"/>) and the user's text, unchanged, as the prompt.
     /// It is also the reply check (<see cref="IReplyChecker"/>): IBM Granite Guardian (<see cref="LlmConfig.SafetyModel"/>)
     /// on the same server judges each reply for every risk in <see cref="GraniteGuardian.Risks"/>, one request each, sent
-    /// together; see <see cref="GraniteGuardian"/>.
+    /// together; see <see cref="GraniteGuardian"/>. Once the server answers, it loads both models
+    /// (<see cref="BuildWarmUpRequests"/>), so the first reply and its check do not wait for a load.
     /// </summary>
     public class OllamaBackend : MonoBehaviour, ILlmBackend, IReplyChecker
     {
@@ -40,6 +41,15 @@ namespace XRScan.Llm
 
         public void Configure(LlmConfig cfg) => config = cfg;
 
+        /// <summary>The language model's path on the server.</summary>
+        public const string GeneratePath = "/api/generate";
+
+        /// <summary>
+        /// How long each start-up warm-up request may take, in seconds. Loading a model from disk can take far longer than
+        /// a reply check may (<see cref="LlmConfig.SafetyCheckTimeoutSeconds"/>, 20 s by default).
+        /// </summary>
+        public const int WarmUpTimeoutSeconds = 120;
+
         public void Initialize()
         {
             if (_initialized) return;
@@ -55,8 +65,96 @@ namespace XRScan.Llm
             yield return req.SendWebRequest();
             _connected = req.result == UnityWebRequest.Result.Success;
             _initialized = true;
-            if (_connected) Debug.Log("[OllamaBackend] connected " + _baseUrl);
+            if (_connected)
+            {
+                Debug.Log("[OllamaBackend] connected " + _baseUrl);
+                StartCoroutine(WarmUp());
+            }
             else OnError.Invoke("Ollama connect failed: " + req.error);
+        }
+
+        /// <summary>One start-up warm-up request: the model it loads, its path on the server and its body.</summary>
+        public readonly struct WarmUpRequest
+        {
+            public readonly string Model;
+            public readonly string Path;
+            public readonly string Json;
+
+            public WarmUpRequest(string model, string path, string json)
+            {
+                Model = model;
+                Path = path;
+                Json = json;
+            }
+        }
+
+        /// <summary>
+        /// The start-up warm-up: the language model through /api/generate with an empty prompt, and the reply check's model
+        /// through /api/chat with no messages. Ollama answers both by loading the model and generating nothing. Each asks
+        /// for the context window of that model's real requests (<see cref="LlmConfig.ContextLength"/>,
+        /// <see cref="LlmConfig.SafetyContextLength"/>): a model loaded at another <c>num_ctx</c> is loaded again by the
+        /// first request that asks for a different one.
+        /// </summary>
+        public static WarmUpRequest[] BuildWarmUpRequests(LlmConfig cfg) => new[]
+        {
+            new WarmUpRequest(cfg.model, GeneratePath, BuildWarmUpJson(cfg.model, cfg.ContextLength)),
+            new WarmUpRequest(cfg.SafetyModel, GraniteGuardian.ChatPath,
+                GraniteGuardian.BuildWarmUpJson(cfg.SafetyModel, cfg.SafetyContextLength)),
+        };
+
+        [Serializable] private class WarmUpReq { public string model; public string prompt; public bool stream; public WarmUpOpt options; }
+        [Serializable] private class WarmUpOpt { public int num_ctx; }
+
+        /// <summary>
+        /// The /api/generate body that loads <paramref name="model"/> with a context window of
+        /// <paramref name="contextLength"/> tokens (clamped like <see cref="LlmConfig.ContextLength"/>) and generates nothing.
+        /// </summary>
+        public static string BuildWarmUpJson(string model, int contextLength) =>
+            JsonUtility.ToJson(new WarmUpReq
+            {
+                model = model ?? string.Empty,
+                prompt = string.Empty,
+                stream = false,
+                options = new WarmUpOpt { num_ctx = LlmConfig.ClampContextLength(contextLength) },
+            });
+
+        /// <summary>
+        /// Loads both models on the server as soon as it answers, at the same time. On a server that had neither loaded,
+        /// the first reply check ran past its 20 s timeout while the safety model loaded, and the first reply was
+        /// withheld. The warm-up only logs: a model that is missing or fails to load is reported by the requests that need
+        /// it, and a reply that comes before the warm-up finishes waits on the server for the same load.
+        /// </summary>
+        private IEnumerator WarmUp()
+        {
+            var plan = BuildWarmUpRequests(config);
+            var requests = new UnityWebRequest[plan.Length];
+            try
+            {
+                for (int i = 0; i < plan.Length; i++)
+                {
+                    var web = new UnityWebRequest(_baseUrl + plan[i].Path, "POST");
+                    web.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(plan[i].Json));
+                    web.downloadHandler = new DownloadHandlerBuffer();
+                    web.SetRequestHeader("Content-Type", "application/json");
+                    web.timeout = WarmUpTimeoutSeconds;
+                    requests[i] = web;
+                    web.SendWebRequest();
+                }
+
+                for (int i = 0; i < requests.Length; i++)
+                {
+                    while (!requests[i].isDone) yield return null;
+                    if (requests[i].result == UnityWebRequest.Result.Success)
+                        Debug.Log("[OllamaBackend] loaded " + plan[i].Model);
+                    else
+                        Debug.LogWarning("[OllamaBackend] could not load " + plan[i].Model + " ahead of the first reply: " +
+                                         requests[i].error);
+                }
+            }
+            finally
+            {
+                foreach (var web in requests) web?.Dispose();
+            }
         }
 
         public void SendTextRequest(string prompt) { if (Ready()) StartCoroutine(Send(prompt, null)); }
@@ -172,7 +270,7 @@ namespace XRScan.Llm
 
             string json = BuildRequestJson(config, prompt,
                 image != null ? new[] { Convert.ToBase64String(image.EncodeToJPG(75)) } : null);
-            using var web = new UnityWebRequest(_baseUrl + "/api/generate", "POST");
+            using var web = new UnityWebRequest(_baseUrl + GeneratePath, "POST");
             web.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
             web.downloadHandler = new DownloadHandlerBuffer();
             web.SetRequestHeader("Content-Type", "application/json");
