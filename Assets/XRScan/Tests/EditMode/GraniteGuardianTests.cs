@@ -39,7 +39,7 @@ namespace XRScan.Tests.EditMode
                 "{\"role\":\"system\",\"content\":\"violence\"}," +
                 "{\"role\":\"user\",\"content\":\"what can I do with this knife?\"}," +
                 "{\"role\":\"assistant\",\"content\":\"Slice bread with it.\"}]," +
-                "\"stream\":false,\"options\":{\"temperature\":0.0}}",
+                "\"stream\":false,\"options\":{\"temperature\":0.0,\"num_ctx\":4096}}",
                 json);
             StringAssert.DoesNotContain(SafetyPrompt.Text, json);
             Assert.AreEqual("/api/chat", GraniteGuardian.ChatPath);

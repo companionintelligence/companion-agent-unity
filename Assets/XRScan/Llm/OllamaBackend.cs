@@ -70,12 +70,14 @@ namespace XRScan.Llm
         }
 
         [Serializable] private class Req { public string model; public string system; public string prompt; public bool stream; public Opt options; public string[] images; }
-        [Serializable] private class Opt { public int num_predict; public float temperature; }
+        [Serializable] private class Opt { public int num_predict; public float temperature; public int num_ctx; }
         [Serializable] private class Resp { public string response; public bool done; public string error; }
 
         /// <summary>
         /// The /api/generate body: the safety prompt and the persona as the <c>system</c> message, the user's text as the
-        /// <c>prompt</c>, and the images (base64) for a vision request.
+        /// <c>prompt</c>, the images (base64) for a vision request, and the context window
+        /// (<c>options.num_ctx</c>, <see cref="LlmConfig.ContextLength"/>), so the server does not load the model at its own
+        /// larger default.
         /// </summary>
         public static string BuildRequestJson(LlmConfig cfg, string prompt, string[] images)
         {
@@ -85,7 +87,7 @@ namespace XRScan.Llm
                 system = cfg.BuildSystemMessage(),
                 prompt = prompt ?? string.Empty,
                 stream = false,
-                options = new Opt { num_predict = cfg.maxTokens, temperature = cfg.temperature },
+                options = new Opt { num_predict = cfg.maxTokens, temperature = cfg.temperature, num_ctx = cfg.ContextLength },
                 images = images ?? new string[0]
             };
             return JsonUtility.ToJson(req);
@@ -122,7 +124,7 @@ namespace XRScan.Llm
             {
                 for (int i = 0; i < risks.Count; i++)
                 {
-                    string json = GraniteGuardian.BuildRequestJson(model, risks[i], question, reply);
+                    string json = GraniteGuardian.BuildRequestJson(model, risks[i], question, reply, config.SafetyContextLength);
                     var web = new UnityWebRequest(_baseUrl + GraniteGuardian.ChatPath, "POST");
                     web.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
                     web.downloadHandler = new DownloadHandlerBuffer();
