@@ -193,6 +193,8 @@ namespace XRScan.Settings
             PlaceInFront(_panel, distance, -0.05f);
             SuspendInput();
             Refresh();
+            // Offer the models the LLM server has, not only the names baked into CompanionConfig.
+            RequestServerModels();
         }
 
         public void Close()
@@ -492,10 +494,53 @@ namespace XRScan.Settings
             var id = _editId;
             EndEdit();
             string message;
-            if (IsSecret(id)) _model.TrySetSecret(id, text, out message);
-            else _model.TrySetEndpoint(id, text, out message);
+            bool saved = IsSecret(id) ? _model.TrySetSecret(id, text, out message) : _model.TrySetEndpoint(id, text, out message);
             ShowNotice(message);
             Refresh();
+            // A new LLM server has its own models: list them for the model row.
+            if (saved && id == SettingId.LlmEndpoint) RequestServerModels();
+        }
+
+        private bool _listingModels;
+
+        /// <summary>
+        /// Starts reading the LLM server's model list into the model row (<see cref="ServerModelLister"/>), in play mode
+        /// only: an Edit Mode test that opens the panel sends nothing.
+        /// </summary>
+        private void RequestServerModels()
+        {
+            if (Application.isPlaying && isActiveAndEnabled) StartCoroutine(ListServerModels());
+        }
+
+        private IEnumerator ListServerModels()
+        {
+            var llm = config != null ? config.llm : null;
+            if (_listingModels || _model == null || llm == null) yield break;
+
+            string url = ServerModelLister.ListUrl(llm, out string problem);
+            if (url == null)
+            {
+                _model.SetServerModelsProblem(problem);
+                RefreshIfOpen();
+                yield break;
+            }
+
+            _listingModels = true;
+            List<string> names = null;
+            string failure = null;
+            yield return ServerModelLister.Fetch(url, llm.requestTimeoutSeconds, found => names = found, why => failure = why);
+            _listingModels = false;
+
+            // The address changed while the list was on its way: it describes the old server. Ask the new one.
+            if (ServerModelLister.ListUrl(llm, out _) != url)
+            {
+                RequestServerModels();
+                yield break;
+            }
+
+            if (names != null) _model.SetServerModels(names);
+            else _model.SetServerModelsProblem(failure);
+            RefreshIfOpen();
         }
 
         private void CancelEdit()
