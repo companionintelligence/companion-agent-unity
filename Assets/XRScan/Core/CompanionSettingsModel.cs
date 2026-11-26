@@ -148,6 +148,39 @@ namespace XRScan.Core
         private AiReply _reportedReply;
         private int _reasonIndex;
 
+        // The chat models the LLM server listed (OllamaModelList), or null while no list is known; and why the last
+        // attempt to get one failed, or null.
+        private List<string> _serverModels;
+        private string _serverModelsProblem;
+
+        /// <summary>The chat models the LLM server listed, or null while none is known (see <see cref="SetServerModels"/>).</summary>
+        public IReadOnlyList<string> ServerModels => _serverModels;
+
+        /// <summary>
+        /// Records the models the LLM server has (its <c>/api/tags</c> list, as <see cref="OllamaModelList.Parse"/> reads
+        /// it). From then on the model row offers these instead of <see cref="CompanionConfig.llmModelChoices"/>, less the
+        /// reply check's model and embedding models (<see cref="OllamaModelList.ChatModels"/>).
+        /// </summary>
+        public void SetServerModels(IEnumerable<string> models)
+        {
+            _serverModels = OllamaModelList.ChatModels(models, _config.llm != null ? _config.llm.SafetyModel : null);
+            _serverModelsProblem = null;
+        }
+
+        /// <summary>The server's model list could not be read; the row says why and offers the configured list.</summary>
+        public void SetServerModelsProblem(string reason)
+        {
+            _serverModels = null;
+            _serverModelsProblem = string.IsNullOrWhiteSpace(reason) ? "no answer" : reason.Trim();
+        }
+
+        /// <summary>Drops the server's list, for instance when the LLM server changes, until it is read again.</summary>
+        public void ForgetServerModels()
+        {
+            _serverModels = null;
+            _serverModelsProblem = null;
+        }
+
         public List<SettingRow> BuildRows()
         {
             var rows = new List<SettingRow>();
@@ -157,8 +190,7 @@ namespace XRScan.Core
             if (llm != null)
             {
                 rows.Add(EndpointRow(SettingId.LlmEndpoint, "LLM server", llm.ResolveEndpoint(_isDevelopmentBuild, _devAllowlist)));
-                rows.Add(new SettingRow(SettingId.LlmModel, SettingKind.Choice, "LLM model", llm.model,
-                    "A model on your own server; change it with left / right.", false));
+                rows.Add(ModelRow(llm));
                 rows.Add(ReplyCheckRow(llm));
             }
 
@@ -297,7 +329,11 @@ namespace XRScan.Core
             if (value.Length == 0)
             {
                 ConfigOverrides.SetOverride(key, null);
-                if (id == SettingId.LlmEndpoint) ConfigOverrides.SetOverride(LlmConfig.PlayerPrefsHostKey, null);
+                if (id == SettingId.LlmEndpoint)
+                {
+                    ConfigOverrides.SetOverride(LlmConfig.PlayerPrefsHostKey, null);
+                    ForgetServerModels();
+                }
                 message = "Override removed; the configured default applies." + RestartHint(id);
                 return true;
             }
@@ -310,7 +346,11 @@ namespace XRScan.Core
             }
 
             ConfigOverrides.SetOverride(key, check.Url.ToString());
-            if (id == SettingId.LlmEndpoint) ConfigOverrides.SetOverride(LlmConfig.PlayerPrefsHostKey, null); // the URL supersedes the legacy host
+            if (id == SettingId.LlmEndpoint)
+            {
+                ConfigOverrides.SetOverride(LlmConfig.PlayerPrefsHostKey, null); // the URL supersedes the legacy host
+                ForgetServerModels(); // the list described the previous server
+            }
 
             message = "Saved " + check.Url + "." + RestartHint(id);
             if (id == SettingId.SpeechServer && CloudProviderHosts.IsKnownCloudHost(check.Url.Host))
@@ -361,6 +401,7 @@ namespace XRScan.Core
         {
             ConfigOverrides.ClearOverrides(OverrideKeys);
             CancelPending();
+            ForgetServerModels(); // the LLM server may have changed back to the configured one
         }
 
         /// <summary>
@@ -441,9 +482,14 @@ namespace XRScan.Core
             }
         }
 
-        /// <summary>The model names offered: the configured choices, the asset default and the current value.</summary>
+        /// <summary>
+        /// The model names offered: the chat models the LLM server listed, once a list with any is known. Otherwise (no
+        /// answer yet, no server, or an empty list) the configured choices, the asset default and the current value.
+        /// </summary>
         public List<string> ModelChoices()
         {
+            if (_serverModels != null && _serverModels.Count > 0) return new List<string>(_serverModels);
+
             var choices = new List<string>();
             var llm = _config.llm;
             if (_config.llmModelChoices != null)
@@ -465,10 +511,47 @@ namespace XRScan.Core
             var choices = ModelChoices();
             if (choices.Count == 0) return null;
 
-            int index = Math.Max(0, choices.IndexOf(llm.model));
-            int next = ((index + (direction >= 0 ? 1 : -1)) % choices.Count + choices.Count) % choices.Count;
+            // From a model that is not in the list (the server lacks it), right picks the first and left the last.
+            int index = choices.IndexOf(llm.model);
+            int next = index < 0
+                ? (direction >= 0 ? 0 : choices.Count - 1)
+                : ((index + (direction >= 0 ? 1 : -1)) % choices.Count + choices.Count) % choices.Count;
             ConfigOverrides.SetOverride(LlmConfig.PlayerPrefsModelKey, choices[next]);
             return "LLM model: " + choices[next];
+        }
+
+        /// <summary>The model row: the current model, and whether the server has it, when its list is known.</summary>
+        private SettingRow ModelRow(LlmConfig llm)
+        {
+            const string label = "LLM model";
+            string current = llm.model;
+
+            if (_serverModels != null)
+            {
+                int count = _serverModels.Count;
+                if (count == 0)
+                {
+                    return new SettingRow(SettingId.LlmModel, SettingKind.Choice, label, current,
+                        "The server lists no chat models. Pull one there, for example: ollama pull " + llm.defaultModel + ".", true);
+                }
+                if (!_serverModels.Contains(current))
+                {
+                    return new SettingRow(SettingId.LlmModel, SettingKind.Choice, label, current,
+                        "The server does not have this model. Left / right picks one of its " + count + ".", true);
+                }
+                return new SettingRow(SettingId.LlmModel, SettingKind.Choice, label, current,
+                    "On the server (" + count + (count == 1 ? " model" : " models") + " there); change it with left / right.", false);
+            }
+
+            if (_serverModelsProblem != null)
+            {
+                return new SettingRow(SettingId.LlmModel, SettingKind.Choice, label, current,
+                    "Could not list the server's models (" + _serverModelsProblem + "); left / right offers the configured list.",
+                    false);
+            }
+
+            return new SettingRow(SettingId.LlmModel, SettingKind.Choice, label, current,
+                "A model on your own server; change it with left / right.", false);
         }
 
         private string ToggleProvider()

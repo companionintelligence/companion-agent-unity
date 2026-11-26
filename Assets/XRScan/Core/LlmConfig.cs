@@ -104,6 +104,38 @@ namespace XRScan.Core
         /// <summary>The effective timeout of one reply check, in seconds.</summary>
         public float SafetyCheckTimeoutSeconds => ReplySafety.ClampTimeout(safetyCheckTimeoutSeconds);
 
+        /// <summary>
+        /// The context window every Ollama request asks for (<c>options.num_ctx</c>), in tokens. Without it Ollama uses its
+        /// server-wide OLLAMA_CONTEXT_LENGTH. On beta-red that is 32768, at which llava:7b alone takes 8.06 GB of the
+        /// RTX 3080's 10 GB, so the language model and the reply check's model unloaded each other on every reply: 37 s for
+        /// a first reply and 42 s for its check (2026-11-25). At 4096 they take 4.9 GB and 3.0 GB, both stay loaded, and a
+        /// warm reply and its check take about a second.
+        /// </summary>
+        public const int DefaultContextLength = 4096;
+
+        public const int MinContextLength = 512;
+        public const int MaxContextLength = 131072;
+
+        [Header("Context window (options.num_ctx)")]
+        [Tooltip("Tokens of context Ollama keeps for the language model, sent with every /api/generate request. 4096 holds " +
+                 "the safety prompt (about 180 tokens), the persona, the scanned objects, the question, a camera image (up to " +
+                 "about 2,900 tokens for llava:7b) and the reply (maxTokens). A prompt longer than this is cut by the server. " +
+                 "Clamped to 512..131072.")]
+        public int contextLength = DefaultContextLength;
+
+        [Tooltip("Tokens of context for the reply check, sent with every /api/chat request to the safety model. A check " +
+                 "carries only the risk name, the question and the reply. Clamped to 512..131072.")]
+        public int safetyContextLength = DefaultContextLength;
+
+        /// <summary>The effective context window of the language model's requests, in tokens.</summary>
+        public int ContextLength => ClampContextLength(contextLength);
+
+        /// <summary>The effective context window of the reply check's requests, in tokens.</summary>
+        public int SafetyContextLength => ClampContextLength(safetyContextLength);
+
+        /// <summary>A context window Ollama accepts and the headset can hold.</summary>
+        public static int ClampContextLength(int tokens) => Mathf.Clamp(tokens, MinContextLength, MaxContextLength);
+
         /// <summary>Effective endpoint under the current build type and allowlist.</summary>
         public EndpointCheck ResolveEndpoint() =>
             ResolveEndpoint(CleartextPolicy.IsDevelopmentBuild, CleartextPolicy.DevAllowlist);

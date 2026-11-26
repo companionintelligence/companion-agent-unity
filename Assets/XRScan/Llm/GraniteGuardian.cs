@@ -57,6 +57,7 @@ namespace XRScan.Llm
         private class Options
         {
             public float temperature;
+            public int num_ctx;
         }
 
         [Serializable]
@@ -78,8 +79,14 @@ namespace XRScan.Llm
         private static readonly Regex Score = new Regex(@"<score>\s*(yes|no)\s*</score>",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        /// <summary>The body of the request that asks <paramref name="model"/> whether <paramref name="reply"/> carries <paramref name="risk"/>.</summary>
-        public static string BuildRequestJson(string model, string risk, string question, string reply)
+        /// <summary>
+        /// The body of the request that asks <paramref name="model"/> whether <paramref name="reply"/> carries
+        /// <paramref name="risk"/>, with the context window <paramref name="contextLength"/> (<c>options.num_ctx</c>,
+        /// clamped like <see cref="LlmConfig.SafetyContextLength"/>), so the server loads the model small enough to stay
+        /// beside the language model.
+        /// </summary>
+        public static string BuildRequestJson(string model, string risk, string question, string reply,
+            int contextLength = LlmConfig.DefaultContextLength)
         {
             return JsonUtility.ToJson(new Request
             {
@@ -91,7 +98,7 @@ namespace XRScan.Llm
                     new Message { role = "assistant", content = reply ?? string.Empty },
                 },
                 stream = false,
-                options = new Options { temperature = 0f },
+                options = new Options { temperature = 0f, num_ctx = LlmConfig.ClampContextLength(contextLength) },
             });
         }
 
